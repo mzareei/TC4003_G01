@@ -1,9 +1,21 @@
+//Author: Roberto Julio Saldana Hernandez
+//StudenId: A00354886
+
 package cos418_hw1_1
+//package main
 
 import (
 	"fmt"
 	"sort"
+	"io/ioutil"
+	"log"
+	"strings"
+	"regexp"
 )
+
+func main(){
+	topWords("simple.txt",5,2)
+}
 
 // Find the top K most common words in a text document.
 // 	path: location of the document
@@ -18,7 +30,56 @@ func topWords(path string, numWords int, charThreshold int) []WordCount {
 	// TODO: implement me
 	// HINT: You may find the `strings.Fields` and `strings.ToLower` functions helpful
 	// HINT: To keep only alphanumeric characters, use the regex "[^0-9a-zA-Z]+"
-	return nil
+
+	//Return variable
+	var result []WordCount
+
+	//Reading the file 
+	content, err := ioutil.ReadFile(path)
+
+	if err != nil {
+		log.Fatal(err)
+		return nil
+	}
+
+	//Removing all punctuations
+	scontent := stripNonAlphanumeric(strings.ToLower(string(content)))
+
+	//Using Fields to iterate between words
+	//I am also using ToLower function to convert all content to lowercase
+	words := strings.Fields(scontent)
+
+	//counting words
+	for _, y := range words {
+		
+		if(len(y) >= charThreshold && !wordCounted(result,y)){
+			newWord := WordCount{y,1}
+			result = append(result,newWord)
+		}
+	}
+
+	sortWordCounts(result)
+
+	fmt.Println(result[0:numWords])
+
+	return result[0:numWords]
+}
+
+func wordCounted(words []WordCount, word string) bool {
+	for x, y := range words {
+		if(y.Word == word){
+			words[x].Count++
+			return true
+		}
+	}
+
+	return false
+}
+
+func stripNonAlphanumeric(in string) string{
+	//I had to modify a little the regex to exclude space as non-alphanumeric strip
+	reg, _ := regexp.Compile("[^0-9a-zA-Z\\s]+")
+	return reg.ReplaceAllString(in,"")
 }
 
 // A struct that represents how many times a word is observed in a document
