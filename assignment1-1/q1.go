@@ -1,5 +1,8 @@
-//Author: Roberto Julio Saldana Hernandez
-//StudenId: A00354886
+//Authors: Roberto Julio Saldana Hernandez A00354886
+//		  Juan Antonio Cuellar de la pena A00354849
+//   	  Ricardo Arturo Benitez Cruz A01018084
+//        Jose Roberto Calderon Samado A00354818
+
 
 package cos418_hw1_1
 //package main
@@ -59,8 +62,6 @@ func topWords(path string, numWords int, charThreshold int) []WordCount {
 	}
 
 	sortWordCounts(result)
-
-	fmt.Println(result[0:numWords])
 
 	return result[0:numWords]
 }
