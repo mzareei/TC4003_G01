@@ -18,7 +18,7 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 
 	//counting words
 	for _, y := range words {
-		res = append(result,KeyValue{ y , 1 })
+		res = append(result, KeyValue{y, 1})
 	}
 
 	return

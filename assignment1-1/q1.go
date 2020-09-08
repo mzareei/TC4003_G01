@@ -3,21 +3,21 @@
 //        Ricardo Arturo Benitez Cruz A01018084
 //        Jose Roberto Calderon Samado A00354818
 
-
 package cos418_hw1_1
+
 //package main
 
 import (
-    "fmt"
-    "sort"
-    "io/ioutil"
-    "log"
-    "strings"
-    "regexp"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"regexp"
+	"sort"
+	"strings"
 )
 
-func main(){
-    topWords("simple.txt",5,2)
+func main() {
+	topWords("simple.txt", 5, 2)
 }
 
 // Find the top K most common words in a text document.
@@ -30,79 +30,79 @@ func main(){
 // are removed, e.g. "don't" becomes "dont".
 // You should use `checkError` to handle potential errors.
 func topWords(path string, numWords int, charThreshold int) []WordCount {
-    // TODO: implement me
-    // HINT: You may find the `strings.Fields` and `strings.ToLower` functions helpful
-    // HINT: To keep only alphanumeric characters, use the regex "[^0-9a-zA-Z]+"
+	// TODO: implement me
+	// HINT: You may find the `strings.Fields` and `strings.ToLower` functions helpful
+	// HINT: To keep only alphanumeric characters, use the regex "[^0-9a-zA-Z]+"
 
-    //Return variable
-    var result []WordCount
+	//Return variable
+	var result []WordCount
 
-    //Reading the file 
-    content, err := ioutil.ReadFile(path)
+	//Reading the file
+	content, err := ioutil.ReadFile(path)
 
-    if err != nil {
-        log.Fatal(err)
-        return nil
-    }
+	if err != nil {
+		log.Fatal(err)
+		return nil
+	}
 
-    //Removing all punctuations
-    scontent := stripNonAlphanumeric(strings.ToLower(string(content)))
+	//Removing all punctuations
+	scontent := stripNonAlphanumeric(strings.ToLower(string(content)))
 
-    //Using Fields to iterate between words
-    //I am also using ToLower function to convert all content to lowercase
-    words := strings.Fields(scontent)
+	//Using Fields to iterate between words
+	//I am also using ToLower function to convert all content to lowercase
+	words := strings.Fields(scontent)
 
-    //counting words
-    for _, y := range words {
-        
-        if(len(y) >= charThreshold && !wordCounted(result,y)){
-            newWord := WordCount{y,1}
-            result = append(result,newWord)
-        }
-    }
+	//counting words
+	for _, y := range words {
 
-    sortWordCounts(result)
+		if len(y) >= charThreshold && !wordCounted(result, y) {
+			newWord := WordCount{y, 1}
+			result = append(result, newWord)
+		}
+	}
 
-    return result[0:numWords]
+	sortWordCounts(result)
+
+	return result[0:numWords]
 }
 
 func wordCounted(words []WordCount, word string) bool {
-    for x, y := range words {
-        if(y.Word == word){
-            words[x].Count++
-            return true
-        }
-    }
+	for x, y := range words {
+		if y.Word == word {
+			words[x].Count++
+			return true
+		}
+	}
 
-    return false
+	return false
 }
 
-func stripNonAlphanumeric(in string) string{
-    //I had to modify a little the regex to exclude space as non-alphanumeric strip
-    reg, _ := regexp.Compile("[^0-9a-zA-Z\\s]+")
-    return reg.ReplaceAllString(in,"")
+func stripNonAlphanumeric(in string) string {
+	//I had to modify a little the regex to exclude space as non-alphanumeric strip
+	reg, _ := regexp.Compile("[^0-9a-zA-Z\\s]+")
+	return reg.ReplaceAllString(in, "")
 }
 
 // A struct that represents how many times a word is observed in a document
 type WordCount struct {
-    Word  string
-    Count int
+	Word  string
+	Count int
 }
 
 func (wc WordCount) String() string {
-    return fmt.Sprintf("%v: %v", wc.Word, wc.Count)
+	return fmt.Sprintf("%v: %v", wc.Word, wc.Count)
 }
 
 // Helper function to sort a list of word counts in place.
 // This sorts by the count in decreasing order, breaking ties using the word.
 // DO NOT MODIFY THIS FUNCTION!
 func sortWordCounts(wordCounts []WordCount) {
-    sort.Slice(wordCounts, func(i, j int) bool {
-        wc1 := wordCounts[i]
-        wc2 := wordCounts[j]
-        if wc1.Count == wc2.Count {
-            return wc1.Word < wc2.Word
-        }
-        return wc1.Count > wc2.Count
-    })
+	sort.Slice(wordCounts, func(i, j int) bool {
+		wc1 := wordCounts[i]
+		wc2 := wordCounts[j]
+		if wc1.Count == wc2.Count {
+			return wc1.Word < wc2.Word
+		}
+		return wc1.Count > wc2.Count
+	})
 }
