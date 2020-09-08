@@ -30,7 +30,8 @@ func (mr *Master) schedule(phase jobPhase) {
     // Time used to wait for registration of the workers to occur
     time.Sleep(50 * time.Millisecond)
 
-    currentWorkers := len(mr.workers)
+    workersSize := len(mr.workers)
+    currentWorker := 0
     for i := 0; i < ntasks; i++ {
         var taskArguments DoTaskArgs
         taskArguments.JobName = mr.jobName
@@ -39,11 +40,13 @@ func (mr *Master) schedule(phase jobPhase) {
         taskArguments.TaskNumber = i
         taskArguments.NumOtherPhase = nios
         called := false
-        called = call(mr.workers[i % currentWorkers], "Worker.DoTask", taskArguments, new(struct{}))
+        called = call(mr.workers[(i + currentWorker) % workersSize], "Worker.DoTask", taskArguments, new(struct{}))
 
         if called == false {
-            fmt.Printf("Error in sending the message to Worker: %v\n", mr.workers[i % currentWorkers])
+            fmt.Printf("Error in sending the message to Worker: %v\n", mr.workers[(i + currentWorker) % workersSize])
+            i -= 1
         }
+        currentWorker = (currentWorker + 1) % workersSize
     }
 
     debug("Schedule: %v phase done\n", phase)
