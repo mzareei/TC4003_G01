@@ -1,5 +1,8 @@
 package raft
-
+import (
+	"fmt"
+	"time"
+)
 //
 // this is an outline of the API that raft must expose to
 // the service (or tester). see comments below for
@@ -38,6 +41,17 @@ type ApplyMsg struct {
 }
 
 //
+// RPC struct needed in the sender and handler.
+type AppendEntries struct {
+	// Empty for the moment, only to be used in the Heartbeat
+}
+
+type AppendEntriesReply struct {
+	// Empty for the moment, only to be used in the Hearbeat
+	dummy int
+}
+
+//
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -50,16 +64,29 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// Persistent data
+	currentTerm      int
+	votedFor         int        // candidateId. null (-1) if none
+	log              []string   //log entries. Command for state machine first is 1
+
+	// Volatile data
+	commitIndex      int
+	lastApplied      int
+
+	// Volatile only on Leader
+	nextIndex        []int    // for each server, index of the next log entry
+	matchIndex       []int    // for each server, index of highest log entry
+
+	// Our own data
+	isLeader         bool
+	currentTime      *time.Timer
+	applyChannel	chan ApplyMsg
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here.
-	return term, isleader
+	return rf.currentTerm, rf.isLeader
 }
 
 //
@@ -91,27 +118,41 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 
-
-
 //
-// example RequestVote RPC arguments structure.
+// RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
-	// Your data here.
+	term            int
+	candidateId     int
+	lastLogIndex    int
+	lastLogTerm     int
 }
 
 //
-// example RequestVote RPC reply structure.
+// RequestVote RPC reply structure.
 //
 type RequestVoteReply struct {
-	// Your data here.
+	term          int  // this.currentTerm, for candidate to update itself
+	voteGranted   bool // true means candidate received vote
 }
 
 //
-// example RequestVote RPC handler.
+// RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
+	fmt.Printf("RequestVote received. I'm %d\n", rf.me)
+	if (args.term < rf.currentTerm) {
+		reply.voteGranted = false
+	} else {
+		if ((rf.lastApplied <= args.lastLogIndex) &&
+		   (rf.votedFor != -1)) {
+			reply.voteGranted = true
+		}
+	}
+	// not right
+	reply.term = rf.currentTerm
+	reply.voteGranted = true
+	return
 }
 
 //
@@ -132,8 +173,29 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
+	fmt.Printf("sendRequestVote from serverId %d\n", rf.me)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
+}
+
+
+
+func (rf *Raft) HeartbeatReceived(entry AppendEntries, reply *AppendEntriesReply) {
+	fmt.Printf("Heartbeat received by server Nbr %d\n", rf.me)
+}
+
+
+func (rf *Raft) sendHeartbeat(entry AppendEntries, reply *AppendEntriesReply) bool {
+	fmt.Printf("Sending Heartbeat from server %d\n", rf.me)
+	var result = true
+	for i := 0; i < len(rf.peers); i++ {
+		// Do not send the heartbeat to myself
+		if (i != rf.me) {
+			fmt.Printf("");
+			result = rf.peers[i].Call("Raft.HeartbeatReceived", entry, &reply)
+		}
+	}
+	return result
 }
 
 
@@ -151,6 +213,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	fmt.Printf("Raft Start")
 	index := -1
 	term := -1
 	isLeader := true
@@ -182,12 +245,33 @@ func (rf *Raft) Kill() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 
 	// Your initialization code here.
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.log = make([]string, 0)
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.isLeader = false
+	rf.applyChannel = applyCh
+
+	/*rf.currentTime = time.AfterFunc(500 * time.Millisecond, func() {
+		arg := AppendEntries{}
+		reply := AppendEntriesReply{}
+		result := rf.sendHeartbeat(arg, &reply)
+		if (!result) {
+			fmt.Println("Error sending the Heartbeat")
+		}
+	})*/
+
+	go startLeaderVote(rf)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -195,3 +279,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	return rf
 }
+
+
+func startLeaderVote(rf *Raft) {
+	args := RequestVoteArgs{}
+	args.term = rf.currentTerm
+	args.candidateId = rf.me
+	args.lastLogIndex = rf.lastApplied
+	args.lastLogTerm = rf.currentTerm
+
+	reply := RequestVoteReply{}
+
+	result := rf.sendRequestVote(rf.me, args, &reply)
+
+	if (!result) {
+		fmt.Printf("Error sending the message to the other servers")
+	}
+}
+
+
