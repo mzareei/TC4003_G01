@@ -122,18 +122,18 @@ func (rf *Raft) readPersist(data []byte) {
 // RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
-	term            int
-	candidateId     int
-	lastLogIndex    int
-	lastLogTerm     int
+	Term            int
+	CandidateId     int
+	LastLogIndex    int
+	LastLogTerm     int
 }
 
 //
 // RequestVote RPC reply structure.
 //
 type RequestVoteReply struct {
-	term          int  // this.currentTerm, for candidate to update itself
-	voteGranted   bool // true means candidate received vote
+	Term          int  // this.currentTerm, for candidate to update itself
+	VoteGranted   bool // true means candidate received vote
 }
 
 //
@@ -141,17 +141,17 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	fmt.Printf("RequestVote received. I'm %d\n", rf.me)
-	if (args.term < rf.currentTerm) {
-		reply.voteGranted = false
+	if (args.Term < rf.currentTerm) {
+		reply.VoteGranted = false
 	} else {
-		if ((rf.lastApplied <= args.lastLogIndex) &&
+		if ((rf.lastApplied <= args.LastLogIndex) &&
 		   (rf.votedFor != -1)) {
-			reply.voteGranted = true
+			reply.VoteGranted = true
 		}
 	}
 	// not right
-	reply.term = rf.currentTerm
-	reply.voteGranted = true
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = true
 	return
 }
 
@@ -283,10 +283,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func startLeaderVote(rf *Raft) {
 	args := RequestVoteArgs{}
-	args.term = rf.currentTerm
-	args.candidateId = rf.me
-	args.lastLogIndex = rf.lastApplied
-	args.lastLogTerm = rf.currentTerm
+	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+	args.LastLogIndex = rf.lastApplied
+	args.LastLogTerm = rf.currentTerm
 
 	reply := RequestVoteReply{}
 
