@@ -2,6 +2,7 @@ package raft
 import (
 	"fmt"
 	"time"
+	"math/rand"
 )
 //
 // this is an outline of the API that raft must expose to
@@ -26,7 +27,14 @@ import "labrpc"
 // import "bytes"
 // import "encoding/gob"
 
+const MIN_TIMEOUT_VALUE = 100
+const MAX_TIMEOUT_VALUE = 300
 
+const (
+	FOLLOWER = iota
+	CANDIDATE = iota
+	LEADER = iota
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -42,27 +50,34 @@ type ApplyMsg struct {
 
 //
 // RPC struct needed in the sender and handler.
+//
 type AppendEntries struct {
 	// Empty for the moment, only to be used in the Heartbeat
 }
 
+//
+// RPC struct needed in the receiver of the RPC to
+//
 type AppendEntriesReply struct {
-	// Empty for the moment, only to be used in the Hearbeat
-	dummy int
+	// Empty for the moment, only to be used in the Heartbeat
+}
+
+//
+// The struct to handle the heartbet timeouts
+//
+type RaftTimeout struct {
+	timeout        time.Duration  // The duration of the timeout
+	snapshot       time.Time      // The current(last) time the hearbeat was received
 }
 
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex
-	peers     []*labrpc.ClientEnd
-	persister *Persister
-	me        int // index into peers[]
-
-	// Your data here.
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	mu               sync.Mutex
+	peers            []*labrpc.ClientEnd
+	persister        *Persister
+	me               int // index into peers[]
 
 	// Persistent data
 	currentTerm      int
@@ -78,15 +93,16 @@ type Raft struct {
 	matchIndex       []int    // for each server, index of highest log entry
 
 	// Our own data
-	isLeader         bool
-	currentTime      *time.Timer
-	applyChannel	chan ApplyMsg
+	state            int
+	heartbeatTimeout  RaftTimeout
+	votingTimeout    RaftTimeout
+	applyChannel     chan ApplyMsg
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	return rf.currentTerm, rf.isLeader
+	return rf.currentTerm, rf.state == LEADER
 }
 
 //
@@ -133,6 +149,7 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	Term          int  // this.currentTerm, for candidate to update itself
+	// Shall it be a channel?
 	VoteGranted   bool // true means candidate received vote
 }
 
@@ -144,15 +161,13 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if (args.Term < rf.currentTerm) {
 		reply.VoteGranted = false
 	} else {
-		if ((rf.lastApplied <= args.LastLogIndex) &&
-		   (rf.votedFor != -1)) {
+		// It updates the current term with the highest one
+		rf.currentTerm = args.Term
+		if ((args.LastLogIndex >= rf.lastApplied) &&
+			(rf.votedFor != -1)) {
 			reply.VoteGranted = true
 		}
 	}
-	// not right
-	reply.Term = rf.currentTerm
-	reply.VoteGranted = true
-	return
 }
 
 //
@@ -181,6 +196,8 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 
 
 func (rf *Raft) HeartbeatReceived(entry AppendEntries, reply *AppendEntriesReply) {
+	// Resets the time the heartbeat has been received
+	rf.heartbeatTimeout.snapshot = time.Now()
 	fmt.Printf("Heartbeat received by server Nbr %d\n", rf.me)
 }
 
@@ -191,8 +208,7 @@ func (rf *Raft) sendHeartbeat(entry AppendEntries, reply *AppendEntriesReply) bo
 	for i := 0; i < len(rf.peers); i++ {
 		// Do not send the heartbeat to myself
 		if (i != rf.me) {
-			fmt.Printf("");
-			result = rf.peers[i].Call("Raft.HeartbeatReceived", entry, &reply)
+			result = rf.peers[i].Call("Raft.HeartbeatReceived", entry, reply)
 		}
 	}
 	return result
@@ -259,41 +275,50 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.isLeader = false
+	rf.state = FOLLOWER
 	rf.applyChannel = applyCh
 
-	/*rf.currentTime = time.AfterFunc(500 * time.Millisecond, func() {
-		arg := AppendEntries{}
-		reply := AppendEntriesReply{}
-		result := rf.sendHeartbeat(arg, &reply)
-		if (!result) {
-			fmt.Println("Error sending the Heartbeat")
-		}
-	})*/
+	// Uses the current time to calculated the seed -> Random timeout value
+	seconds := time.Now().Second()
+	newSource := rand.NewSource(int64(seconds * (rf.me + 1)))
+	timeoutValue := rand.New(newSource).Int() %
+						(MAX_TIMEOUT_VALUE - MIN_TIMEOUT_VALUE)
+	duration := time.Duration(MIN_TIMEOUT_VALUE + timeoutValue) * time.Millisecond
+	rf.heartbeatTimeout = RaftTimeout{duration, time.Now()}
+	// TODO: Fix the creation of this voting timeout
+	rf.votingTimeout = RaftTimeout{duration, time.Now()}
 
 	go startLeaderVote(rf)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
 	return rf
 }
 
 
 func startLeaderVote(rf *Raft) {
-	args := RequestVoteArgs{}
-	args.Term = rf.currentTerm
-	args.CandidateId = rf.me
-	args.LastLogIndex = rf.lastApplied
-	args.LastLogTerm = rf.currentTerm
+	for {
+		// We have not received the heartbeat
+		// We are going to request a vote
+		if (time.Since(rf.heartbeatTimeout.snapshot) >= rf.heartbeatTimeout.timeout) {
+			rf.currentTerm += 1
+			rf.state = CANDIDATE
 
-	reply := RequestVoteReply{}
+			args := RequestVoteArgs{}
+			args.Term = rf.currentTerm
+			args.CandidateId = rf.me
+			args.LastLogIndex = rf.lastApplied
+			args.LastLogTerm = rf.currentTerm
 
-	result := rf.sendRequestVote(rf.me, args, &reply)
+			reply := RequestVoteReply{}
 
-	if (!result) {
-		fmt.Printf("Error sending the message to the other servers")
+			result := rf.sendRequestVote(rf.me, args, &reply)
+
+			if (!result) {
+				fmt.Printf("Error sending the message to the other servers")
+			}
+		}
 	}
 }
 
