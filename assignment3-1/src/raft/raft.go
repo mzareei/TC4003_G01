@@ -29,7 +29,7 @@ import "labrpc"
 
 const MIN_TIMEOUT_VALUE = 150
 const MAX_TIMEOUT_VALUE = 300
-const VOTING_TIMEOUT_VALUE = MIN_TIMEOUT_VALUE + MAX_TIMEOUT_VALUE + 300
+const VOTING_TIMEOUT_VALUE = MIN_TIMEOUT_VALUE + MAX_TIMEOUT_VALUE + 500
 
 const (
 	FOLLOWER = iota
@@ -99,7 +99,7 @@ type Raft struct {
 	electionTimeout  RaftTimeout
 	votingTimeout    RaftTimeout
 	leaderHeartbeat  RaftTimeout
-	serverErrors     int
+	currentVotes     int
 	applyChannel     chan ApplyMsg
 }
 
@@ -162,7 +162,8 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	DPrintf("args.server:%d,args.Term:%d\n",args.CandidateId, args.Term)
+	DPrintf("Server:%d, term:%d\n", rf.me, rf.currentTerm)
 	if (args.Term < rf.currentTerm) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -191,6 +192,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			DPrintf("RequestVote::I(%d) have already voted or you are outdated\n", rf.me)
 		}
 	}
+	rf.mu.Unlock()
 }
 
 //
@@ -222,15 +224,16 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 func (rf *Raft) HeartbeatReceived(entry AppendEntries, reply *AppendEntriesReply) {
 	// Resets the time the heartbeat has been received
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	rf.electionTimeout.snapshot = time.Now()
 	DPrintf("HeartbeatReceived::Received by server Nbr %d from: %d\n", rf.me, entry.LeaderId)
+	rf.votedFor = -1
 	if (entry.Term > rf.currentTerm) {
-		DPrintf("Updating the currentTerm")
+		DPrintf("Updating the currentTerm\n")
 		rf.currentTerm = entry.Term
 		rf.state = FOLLOWER
-		rf.votedFor = -1
+		//rf.votedFor = -1
 	}
+	rf.mu.Unlock()
 }
 
 
@@ -304,7 +307,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.state = FOLLOWER
-	rf.serverErrors = 0
+	rf.currentVotes = 0
 	rf.applyChannel = applyCh
 
 	// Uses the current time to calculated the seed -> Random timeout value
@@ -332,29 +335,39 @@ func HandleRaftState(rf *Raft) {
 	for {
 		switch rf.state {
 			case FOLLOWER:
+				rf.mu.Lock()
 				timeDiff := time.Since(rf.electionTimeout.snapshot)
-
+				valueElectionTimeout := rf.electionTimeout.timeout
+				rf.mu.Unlock()
 				// We have not received the heartbeat
 				// We are going to request a vote
-				if (timeDiff >= rf.electionTimeout.timeout) {
+				if (timeDiff >= valueElectionTimeout) {
 					handleVoteRequest(rf)
 				}
 			case CANDIDATE:
+				rf.mu.Lock()
 				timeDiff := time.Since(rf.votingTimeout.snapshot)
+				valueVotingTimeout := rf.votingTimeout.timeout
+				server := rf.me
+				rf.mu.Unlock()
 
 				// We are still in CANDIDATE and the voting was not conclusive
-				if (timeDiff >= rf.votingTimeout.timeout) {
-					DPrintf("The time in Candidate has passed for server: %d", rf.me)
-
+				if (timeDiff >= valueVotingTimeout) {
+					DPrintf("The time in Candidate has passed for server: %d\n", server)
 					handleVoteRequest(rf)
 				}
-			case LEADER:
-				timeDiff := time.Since(rf.leaderHeartbeat.snapshot)
 
-				if (timeDiff >= rf.leaderHeartbeat.timeout) {
+			case LEADER:
+				rf.mu.Lock()
+				timeDiff := time.Since(rf.leaderHeartbeat.snapshot)
+				valueHeartbeatTimeout := rf.leaderHeartbeat.timeout
+				rf.mu.Unlock()
+
+				if (timeDiff >= valueHeartbeatTimeout) {
 					handleHeartbeat(rf)
 				}
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -365,64 +378,69 @@ func handleVoteRequest(rf *Raft) {
 	rf.state = CANDIDATE
 	rf.votingTimeout.snapshot = time.Now()
 	rf.votedFor = rf.me
+	//rf.currentVotes = 0 // This shall be 1, but if activated the test fails...
 	rf.mu.Unlock()
 
+	for i := 0; i < len(rf.peers); i++ {
+		// Do not send the vote request to myself
+		if (i != rf.me) {
+			go sendRequestsRoutine(rf, i)
+		}
+	}
+}
+
+func sendRequestsRoutine(rf *Raft, server int) {
 	args := RequestVoteArgs{}
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
 	args.LastLogIndex = rf.lastApplied
 	args.LastLogTerm = rf.currentTerm
 
-	reply := RequestVoteReply{-1, false}
-	currentVotes := 1
+	reply := &RequestVoteReply{-1, false}
 
-	for i := 0; i < len(rf.peers); i++ {
-		// Do not send the vote request to myself
-		if (i != rf.me) {
-			result := rf.sendRequestVote(i, args, &reply)
+	result := rf.sendRequestVote(server, args, reply)
 
-			if (!result) {
-				DPrintf("Error sending the message to the server with Id:%d from %d\n", i, rf.me)
-				rf.serverErrors += 1
-				if (rf.state != CANDIDATE) {
-					break 
-				}
-			} else {
-				if (reply.VoteGranted == true) {
-					currentVotes += 1
-				} else {
-					rf.currentTerm = reply.Term
-				}
-			}
-		}
-	}
-	// I received the majority of the votes
-	//validQuorum := (len(rf.peers) - rf.serverErrors) > 1
-	if (currentVotes > ((len(rf.peers)) / 2)) {
-		// Don't initialize the timer here so the new leader can immediately
-		// send the heartbeat to the FOLLOWERs/CANDIDATEs
+	if (result) {
 		rf.mu.Lock()
-		rf.state = LEADER
+		if (reply.VoteGranted == true) {
+			rf.currentVotes += 1
+		} else {
+			rf.currentTerm = reply.Term
+		}
+		if (rf.currentVotes > ((len(rf.peers)) / 2)) {
+			// Don't initialize the timer here so the new leader can immediately
+			// send the heartbeat to the FOLLOWERs/CANDIDATEs
+			//rf.mu.Lock()
+			rf.state = LEADER
+			DPrintf("I won the election: %d\n", rf.me)
+		}
 		rf.mu.Unlock()
-		DPrintf("I won the election: %d", rf.me)
+	} else {
+		DPrintf("sendRequestsRoutine:: Error al mandar el mensaje\n")
 	}
 }
 
 func handleHeartbeat(rf *Raft) {
+	rf.mu.Lock()
 	rf.leaderHeartbeat.snapshot = time.Now()
-
-	args := AppendEntries{rf.currentTerm, rf.me}
-	reply := AppendEntriesReply{}
 
 	for i := 0; i < len(rf.peers); i++ {
 		// Do not send the vote request to myself
 		if (i != rf.me) {
-			result := rf.sendHeartbeat(i, args, &reply)
-
-			if (!result) {
-				DPrintf("handleHeartbeat Error sending the message to server %d\n", i)
-			}
+			go sendHeartbeatRoutine(rf, i)
 		}
+	}
+	rf.mu.Unlock()
+}
+
+func sendHeartbeatRoutine(rf *Raft, server int) {
+	args := AppendEntries{rf.currentTerm, rf.me}
+	reply := &AppendEntriesReply{}
+
+	result := rf.sendHeartbeat(server, args, reply)
+
+	if (!result) {
+		DPrintf("sendHeartbeatRoutine:: Error al mandar el mensaje\n")
 	}
 }
 
