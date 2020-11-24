@@ -1,6 +1,6 @@
 package raft
 import (
-	"fmt"
+	//"fmt"
 	"time"
 	"math/rand"
 )
@@ -27,8 +27,9 @@ import "labrpc"
 // import "bytes"
 // import "encoding/gob"
 
-const MIN_TIMEOUT_VALUE = 100
+const MIN_TIMEOUT_VALUE = 150
 const MAX_TIMEOUT_VALUE = 300
+const VOTING_TIMEOUT_VALUE = MIN_TIMEOUT_VALUE + MAX_TIMEOUT_VALUE + 500
 
 const (
 	FOLLOWER = iota
@@ -52,7 +53,8 @@ type ApplyMsg struct {
 // RPC struct needed in the sender and handler.
 //
 type AppendEntries struct {
-	// Empty for the moment, only to be used in the Heartbeat
+	Term          int   // Leaders term
+	LeaderId      int   // Leaders Id
 }
 
 //
@@ -94,8 +96,10 @@ type Raft struct {
 
 	// Our own data
 	state            int
-	heartbeatTimeout  RaftTimeout
+	electionTimeout  RaftTimeout
 	votingTimeout    RaftTimeout
+	leaderHeartbeat  RaftTimeout
+	serverErrors     int
 	applyChannel     chan ApplyMsg
 }
 
@@ -157,15 +161,27 @@ type RequestVoteReply struct {
 // RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	fmt.Printf("RequestVote received. I'm %d\n", rf.me)
 	if (args.Term < rf.currentTerm) {
 		reply.VoteGranted = false
-	} else {
+		reply.Term = rf.currentTerm
+	} else if (args.Term > rf.currentTerm) {
 		// It updates the current term with the highest one
 		rf.currentTerm = args.Term
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		rf.electionTimeout.snapshot = time.Now()
+		DPrintf("RequestVote:: Term > than. Server %d Votes %d\n", rf.me, args.CandidateId)
+	} else {
 		if ((args.LastLogIndex >= rf.lastApplied) &&
-			(rf.votedFor != -1)) {
+			(rf.votedFor == -1)) {
 			reply.VoteGranted = true
+			rf.votedFor = args.CandidateId
+			// This gives more time to the new leader to send the heartbeat
+			rf.electionTimeout.snapshot = time.Now()
+			DPrintf("RequestVote:: Server %d Votes %d\n", rf.me, args.CandidateId)
+		} else {
+			reply.VoteGranted = false
+			DPrintf("RequestVote::I(%d) have already voted or you are outdated\n", rf.me)
 		}
 	}
 }
@@ -188,7 +204,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
-	fmt.Printf("sendRequestVote from serverId %d\n", rf.me)
+	DPrintf("sendRequestVote:: to serverId %d from:%d\n", server, rf.me)
+
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -197,21 +214,21 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 
 func (rf *Raft) HeartbeatReceived(entry AppendEntries, reply *AppendEntriesReply) {
 	// Resets the time the heartbeat has been received
-	rf.heartbeatTimeout.snapshot = time.Now()
-	fmt.Printf("Heartbeat received by server Nbr %d\n", rf.me)
+	rf.electionTimeout.snapshot = time.Now()
+	//DPrintf("HeartbeatReceived::Received by server Nbr %d\n", rf.me)
+	if (entry.Term >= rf.currentTerm) {
+		rf.currentTerm = entry.Term
+		rf.state = FOLLOWER
+	}
 }
 
 
-func (rf *Raft) sendHeartbeat(entry AppendEntries, reply *AppendEntriesReply) bool {
-	fmt.Printf("Sending Heartbeat from server %d\n", rf.me)
-	var result = true
-	for i := 0; i < len(rf.peers); i++ {
-		// Do not send the heartbeat to myself
-		if (i != rf.me) {
-			result = rf.peers[i].Call("Raft.HeartbeatReceived", entry, reply)
-		}
-	}
-	return result
+func (rf *Raft) sendHeartbeat(server int, entry AppendEntries, reply *AppendEntriesReply) bool {
+	//DPrintf("sendHeartbeat::Sending from server %d\n", rf.me)
+
+	ok := rf.peers[server].Call("Raft.HeartbeatReceived", entry, reply)
+
+	return ok
 }
 
 
@@ -229,7 +246,7 @@ func (rf *Raft) sendHeartbeat(entry AppendEntries, reply *AppendEntriesReply) bo
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	fmt.Printf("Raft Start")
+	DPrintf("Raft Start")
 	index := -1
 	term := -1
 	isLeader := true
@@ -276,6 +293,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.state = FOLLOWER
+	rf.serverErrors = 0
 	rf.applyChannel = applyCh
 
 	// Uses the current time to calculated the seed -> Random timeout value
@@ -284,11 +302,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	timeoutValue := rand.New(newSource).Int() %
 						(MAX_TIMEOUT_VALUE - MIN_TIMEOUT_VALUE)
 	duration := time.Duration(MIN_TIMEOUT_VALUE + timeoutValue) * time.Millisecond
-	rf.heartbeatTimeout = RaftTimeout{duration, time.Now()}
-	// TODO: Fix the creation of this voting timeout
-	rf.votingTimeout = RaftTimeout{duration, time.Now()}
 
-	go startLeaderVote(rf)
+	currTime := time.Now()
+	rf.electionTimeout = RaftTimeout{duration, currTime}
+	rf.votingTimeout = RaftTimeout{VOTING_TIMEOUT_VALUE, currTime}
+	rf.leaderHeartbeat = RaftTimeout{duration / 2, currTime}
+
+	go HandleRaftState(rf)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -297,26 +317,95 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 
-func startLeaderVote(rf *Raft) {
+func HandleRaftState(rf *Raft) {
+	//oneTime := false
 	for {
-		// We have not received the heartbeat
-		// We are going to request a vote
-		if (time.Since(rf.heartbeatTimeout.snapshot) >= rf.heartbeatTimeout.timeout) {
-			rf.currentTerm += 1
-			rf.state = CANDIDATE
+		switch rf.state {
+			case FOLLOWER:
+				timeDiff := time.Since(rf.electionTimeout.snapshot)
 
-			args := RequestVoteArgs{}
-			args.Term = rf.currentTerm
-			args.CandidateId = rf.me
-			args.LastLogIndex = rf.lastApplied
-			args.LastLogTerm = rf.currentTerm
+				// We have not received the heartbeat
+				// We are going to request a vote
+				if (timeDiff >= rf.electionTimeout.timeout) {
+					// Only ask to be a leader if I have not voted in this term
+					// This prevents the infinite tie in the voting process when
+					// small number of servers are available
+					handleVoteRequest(rf)
 
-			reply := RequestVoteReply{}
+				}
+			case CANDIDATE:
+				timeDiff := time.Since(rf.votingTimeout.snapshot)
 
-			result := rf.sendRequestVote(rf.me, args, &reply)
+				// We are still in CANDIDATE and the voting was not conclusive
+				if (timeDiff >= rf.votingTimeout.timeout) {
+					//oneTime = true
+					DPrintf("The time in Candidate has passed for server: %d", rf.me)
+					handleVoteRequest(rf)
+					rf.serverErrors = 0
+				}
+			case LEADER:
+				timeDiff := time.Since(rf.leaderHeartbeat.snapshot)
+
+				if (timeDiff >= rf.leaderHeartbeat.timeout) {
+					handleHeartbeat(rf)
+				}
+		}
+	}
+}
+
+func handleVoteRequest(rf *Raft) {
+	rf.currentTerm += 1
+	rf.state = CANDIDATE
+	rf.votingTimeout.snapshot = time.Now()
+
+	args := RequestVoteArgs{}
+	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+	args.LastLogIndex = rf.lastApplied
+	args.LastLogTerm = rf.currentTerm
+
+	reply := RequestVoteReply{-1, false}
+	currentVotes := 1
+	rf.votedFor = rf.me
+	for i := 0; i < len(rf.peers); i++ {
+		// Do not send the vote request to myself
+		if (i != rf.me) {
+			result := rf.sendRequestVote(i, args, &reply)
 
 			if (!result) {
-				fmt.Printf("Error sending the message to the other servers")
+				DPrintf("Error sending the message to the server with Id:%d from %d\n", i, rf.me)
+				rf.serverErrors += 1
+			} else {
+				if (reply.VoteGranted == true) {
+					currentVotes += 1
+				} else {
+					rf.currentTerm = reply.Term
+				}
+			}
+		}
+	}
+	// I received the majority of the votes
+	if (currentVotes > ((len(rf.peers) - rf.serverErrors) / 2)) {
+		// Don't initialize the timer here so the new leader can immediately
+		// send the heartbeat to the FOLLOWERs/CANDIDATEs
+		rf.state = LEADER
+		DPrintf("I won the election: %d", rf.me)
+	}
+}
+
+func handleHeartbeat(rf *Raft) {
+	rf.leaderHeartbeat.snapshot = time.Now()
+
+	args := AppendEntries{rf.currentTerm, rf.me}
+	reply := AppendEntriesReply{}
+
+	for i := 0; i < len(rf.peers); i++ {
+		// Do not send the vote request to myself
+		if (i != rf.me) {
+			result := rf.sendHeartbeat(i, args, &reply)
+
+			if (!result) {
+				DPrintf("handleHeartbeat Error sending the message to server %d\n", i)
 			}
 		}
 	}
