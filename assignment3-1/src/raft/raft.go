@@ -29,7 +29,7 @@ import "labrpc"
 
 const MIN_TIMEOUT_VALUE = 150
 const MAX_TIMEOUT_VALUE = 300
-const VOTING_TIMEOUT_VALUE = MIN_TIMEOUT_VALUE + MAX_TIMEOUT_VALUE + 500
+const VOTING_TIMEOUT_VALUE = MIN_TIMEOUT_VALUE + MAX_TIMEOUT_VALUE + 300
 
 const (
 	FOLLOWER = iota
@@ -161,23 +161,30 @@ type RequestVoteReply struct {
 // RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if (args.Term < rf.currentTerm) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else if (args.Term > rf.currentTerm) {
 		// It updates the current term with the highest one
 		rf.currentTerm = args.Term
-		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.electionTimeout.snapshot = time.Now()
+		rf.state = FOLLOWER
+
+		reply.VoteGranted = true
+		reply.Term = rf.currentTerm
 		DPrintf("RequestVote:: Term > than. Server %d Votes %d\n", rf.me, args.CandidateId)
 	} else {
 		if ((args.LastLogIndex >= rf.lastApplied) &&
 			(rf.votedFor == -1)) {
-			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
-			// This gives more time to the new leader to send the heartbeat
 			rf.electionTimeout.snapshot = time.Now()
+			rf.state = FOLLOWER
+
+			reply.VoteGranted = true
+			reply.Term = rf.currentTerm
 			DPrintf("RequestVote:: Server %d Votes %d\n", rf.me, args.CandidateId)
 		} else {
 			reply.VoteGranted = false
@@ -214,11 +221,15 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 
 func (rf *Raft) HeartbeatReceived(entry AppendEntries, reply *AppendEntriesReply) {
 	// Resets the time the heartbeat has been received
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.electionTimeout.snapshot = time.Now()
-	//DPrintf("HeartbeatReceived::Received by server Nbr %d\n", rf.me)
-	if (entry.Term >= rf.currentTerm) {
+	DPrintf("HeartbeatReceived::Received by server Nbr %d from: %d\n", rf.me, entry.LeaderId)
+	if (entry.Term > rf.currentTerm) {
+		DPrintf("Updating the currentTerm")
 		rf.currentTerm = entry.Term
 		rf.state = FOLLOWER
+		rf.votedFor = -1
 	}
 }
 
@@ -249,10 +260,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	DPrintf("Raft Start")
 	index := -1
 	term := -1
-	isLeader := true
+	//isLeader := true
 
 
-	return index, term, isLeader
+	return index, term, rf.state == LEADER
 }
 
 //
@@ -318,7 +329,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 func HandleRaftState(rf *Raft) {
-	//oneTime := false
 	for {
 		switch rf.state {
 			case FOLLOWER:
@@ -327,21 +337,16 @@ func HandleRaftState(rf *Raft) {
 				// We have not received the heartbeat
 				// We are going to request a vote
 				if (timeDiff >= rf.electionTimeout.timeout) {
-					// Only ask to be a leader if I have not voted in this term
-					// This prevents the infinite tie in the voting process when
-					// small number of servers are available
 					handleVoteRequest(rf)
-
 				}
 			case CANDIDATE:
 				timeDiff := time.Since(rf.votingTimeout.snapshot)
 
 				// We are still in CANDIDATE and the voting was not conclusive
 				if (timeDiff >= rf.votingTimeout.timeout) {
-					//oneTime = true
 					DPrintf("The time in Candidate has passed for server: %d", rf.me)
+
 					handleVoteRequest(rf)
-					rf.serverErrors = 0
 				}
 			case LEADER:
 				timeDiff := time.Since(rf.leaderHeartbeat.snapshot)
@@ -353,10 +358,14 @@ func HandleRaftState(rf *Raft) {
 	}
 }
 
+
 func handleVoteRequest(rf *Raft) {
+	rf.mu.Lock()
 	rf.currentTerm += 1
 	rf.state = CANDIDATE
 	rf.votingTimeout.snapshot = time.Now()
+	rf.votedFor = rf.me
+	rf.mu.Unlock()
 
 	args := RequestVoteArgs{}
 	args.Term = rf.currentTerm
@@ -366,7 +375,7 @@ func handleVoteRequest(rf *Raft) {
 
 	reply := RequestVoteReply{-1, false}
 	currentVotes := 1
-	rf.votedFor = rf.me
+
 	for i := 0; i < len(rf.peers); i++ {
 		// Do not send the vote request to myself
 		if (i != rf.me) {
@@ -375,6 +384,9 @@ func handleVoteRequest(rf *Raft) {
 			if (!result) {
 				DPrintf("Error sending the message to the server with Id:%d from %d\n", i, rf.me)
 				rf.serverErrors += 1
+				if (rf.state != CANDIDATE) {
+					break 
+				}
 			} else {
 				if (reply.VoteGranted == true) {
 					currentVotes += 1
@@ -385,10 +397,13 @@ func handleVoteRequest(rf *Raft) {
 		}
 	}
 	// I received the majority of the votes
-	if (currentVotes > ((len(rf.peers) - rf.serverErrors) / 2)) {
+	//validQuorum := (len(rf.peers) - rf.serverErrors) > 1
+	if (currentVotes > ((len(rf.peers)) / 2)) {
 		// Don't initialize the timer here so the new leader can immediately
 		// send the heartbeat to the FOLLOWERs/CANDIDATEs
+		rf.mu.Lock()
 		rf.state = LEADER
+		rf.mu.Unlock()
 		DPrintf("I won the election: %d", rf.me)
 	}
 }
