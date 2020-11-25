@@ -53,15 +53,20 @@ type ApplyMsg struct {
 // RPC struct needed in the sender and handler.
 //
 type AppendEntries struct {
-	Term          int   // Leaders term
-	LeaderId      int   // Leaders Id
+	Term            int   // Leaders term
+	LeaderId        int   // Leaders Id
+	PrevLogIndex    int   // index of log entry immediately proceding new ones
+	PrevLogTerm     int   // term of PrevLogIndex entry
+	Entries         []int // log entries to store (empty for hearbeat)
+	LeadersCommit   int   // leader's commitIndex
 }
 
 //
 // RPC struct needed in the receiver of the RPC to
 //
 type AppendEntriesReply struct {
-	// Empty for the moment, only to be used in the Heartbeat
+	Term     int  // Raft.currentTerm, for leader to update itself
+	Success  bool // true if follower contained entry matching PrevLogIndex and PrevLogTerm
 }
 
 //
@@ -79,12 +84,12 @@ type Raft struct {
 	mu               sync.Mutex
 	peers            []*labrpc.ClientEnd
 	persister        *Persister
-	me               int // index into peers[]
+	me               int      // index into peers[]
 
 	// Persistent data
 	currentTerm      int
-	votedFor         int        // candidateId. null (-1) if none
-	log              []string   //log entries. Command for state machine first is 1
+	votedFor         int      // candidateId. null (-1) if none
+	log              []int    //log entries. Command for state machine first is 1
 
 	// Volatile data
 	commitIndex      int
@@ -153,7 +158,6 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	Term          int  // this.currentTerm, for candidate to update itself
-	// Shall it be a channel?
 	VoteGranted   bool // true means candidate received vote
 }
 
@@ -162,8 +166,6 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	DPrintf("args.server:%d,args.Term:%d\n",args.CandidateId, args.Term)
-	DPrintf("Server:%d, term:%d\n", rf.me, rf.currentTerm)
 	if (args.Term < rf.currentTerm) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -180,6 +182,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		if ((args.LastLogIndex >= rf.lastApplied) &&
 			(rf.votedFor == -1)) {
+
 			rf.votedFor = args.CandidateId
 			rf.electionTimeout.snapshot = time.Now()
 			rf.state = FOLLOWER
@@ -196,21 +199,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 //
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
+// Send a RequestVote RPC to a server.
 // returns true if labrpc says the RPC was delivered.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	DPrintf("sendRequestVote:: to serverId %d from:%d\n", server, rf.me)
@@ -220,26 +210,33 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 }
 
 
-
+//
+// HeartbeatReceived RPC handle
+//
 func (rf *Raft) HeartbeatReceived(entry AppendEntries, reply *AppendEntriesReply) {
-	// Resets the time the heartbeat has been received
-	rf.mu.Lock()
-	rf.electionTimeout.snapshot = time.Now()
 	DPrintf("HeartbeatReceived::Received by server Nbr %d from: %d\n", rf.me, entry.LeaderId)
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.electionTimeout.snapshot = time.Now()
+
+	if (entry.Term < rf.currentTerm) {
+		reply.Success = false
+	}
 	rf.votedFor = -1
 	if (entry.Term > rf.currentTerm) {
 		DPrintf("Updating the currentTerm\n")
 		rf.currentTerm = entry.Term
 		rf.state = FOLLOWER
-		//rf.votedFor = -1
 	}
-	rf.mu.Unlock()
 }
 
-
+//
+// Sends a HeartbeatReceived RPC to a server
+// returns true if labrpc says the RPC was delivered
+//
 func (rf *Raft) sendHeartbeat(server int, entry AppendEntries, reply *AppendEntriesReply) bool {
-	//DPrintf("sendHeartbeat::Sending from server %d\n", rf.me)
-
 	ok := rf.peers[server].Call("Raft.HeartbeatReceived", entry, reply)
 
 	return ok
@@ -261,12 +258,14 @@ func (rf *Raft) sendHeartbeat(server int, entry AppendEntries, reply *AppendEntr
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	DPrintf("Raft Start")
-	index := -1
-	term := -1
-	//isLeader := true
+	rf.mu.Lock()
+	index := rf.commitIndex
+	term := rf.currentTerm
+	leader := rf.state == LEADER
+	rf.mu.Unlock()
 
 
-	return index, term, rf.state == LEADER
+	return index, term, leader
 }
 
 //
@@ -277,6 +276,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	DPrintf("Server %d has been killed\n", rf.me)
 }
 
 //
@@ -301,7 +301,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here.
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = make([]string, 0)
+	rf.log = make([]int, 0)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -378,18 +378,18 @@ func handleVoteRequest(rf *Raft) {
 	rf.state = CANDIDATE
 	rf.votingTimeout.snapshot = time.Now()
 	rf.votedFor = rf.me
-	//rf.currentVotes = 0 // This shall be 1, but if activated the test fails...
+	rf.currentVotes = 1
 	rf.mu.Unlock()
 
 	for i := 0; i < len(rf.peers); i++ {
 		// Do not send the vote request to myself
 		if (i != rf.me) {
-			go sendRequestsRoutine(rf, i)
+			go sendVoteRequestsRoutine(rf, i)
 		}
 	}
 }
 
-func sendRequestsRoutine(rf *Raft, server int) {
+func sendVoteRequestsRoutine(rf *Raft, server int) {
 	args := RequestVoteArgs{}
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
@@ -410,7 +410,6 @@ func sendRequestsRoutine(rf *Raft, server int) {
 		if (rf.currentVotes > ((len(rf.peers)) / 2)) {
 			// Don't initialize the timer here so the new leader can immediately
 			// send the heartbeat to the FOLLOWERs/CANDIDATEs
-			//rf.mu.Lock()
 			rf.state = LEADER
 			DPrintf("I won the election: %d\n", rf.me)
 		}
@@ -434,8 +433,17 @@ func handleHeartbeat(rf *Raft) {
 }
 
 func sendHeartbeatRoutine(rf *Raft, server int) {
-	args := AppendEntries{rf.currentTerm, rf.me}
-	reply := &AppendEntriesReply{}
+	args := AppendEntries{}
+	reply := &AppendEntriesReply{-1, false}
+
+	rf.mu.Lock()
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	args.PrevLogIndex = rf.lastApplied
+	args.PrevLogTerm = rf.currentTerm - 1 // ?
+	args.Entries = make([]int, 0)  // Sendint empy entries wwhan sending heartbeat
+	args.LeadersCommit = rf.commitIndex
+	rf.mu.Unlock()
 
 	result := rf.sendHeartbeat(server, args, reply)
 
